@@ -5,6 +5,34 @@ import {
   GLTFLoader,
   type GLTF,
 } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { ConvexClient } from "convex/browser";
+import { api } from "../convex/_generated/api";
+
+// Before scene setup, initialize Convex
+const convex = new ConvexClient(import.meta.env.VITE_CONVEX_URL);
+
+// Before controls setup, add variables
+let playerName: string = "";
+let score: number = 0;
+let timeLeft: number = 30; // 30 seconds
+let timerId: number | null = null;
+const timerDisplay = document.getElementById("timer")!;
+
+// Leaderboard modal
+const leaderboardModal = document.getElementById("leaderboard-modal")!;
+const leaderboardContent = document.getElementById("leaderboard-content")!;
+const showLeaderboardButton = document.getElementById("show-leaderboard")!;
+const closeLeaderboardButton = document.getElementById("close-leaderboard")!;
+showLeaderboardButton.addEventListener("click", async () => {
+  const scores = await convex.query(api.leaderboard.getLeaderboard, {}); // Use api.leaderboard.getLeaderboard
+  leaderboardContent.innerHTML = scores.length
+    ? scores.map((s: any) => `<p>${s.playerName}: ${s.score}</p>`).join("")
+    : "<p>No scores yet!</p>";
+  leaderboardModal.style.display = "block";
+});
+closeLeaderboardButton.addEventListener("click", () => {
+  leaderboardModal.style.display = "none";
+});
 
 // Scene setup
 const scene = new THREE.Scene();
@@ -43,7 +71,18 @@ const controls = new PointerLockControls(camera, renderer.domElement);
 const crosshair = document.getElementById("crosshair")!;
 const mainMenu = document.getElementById("main-menu")!;
 const exitMessage = document.getElementById("exit-message")!;
-const startGameButton = document.getElementById("start-game")!;
+
+// After existing controls setup, update startGameButton and add name input logic
+const startGameButton = document.getElementById(
+  "start-game"
+)! as HTMLButtonElement; // Cast to HTMLButtonElement
+const playerNameInput = document.getElementById(
+  "player-name"
+)! as HTMLInputElement;
+playerNameInput.addEventListener("input", () => {
+  playerName = playerNameInput.value.trim();
+  startGameButton.disabled = playerName.length === 0; // Now works with HTMLButtonElement
+});
 
 let isGameActive = false;
 
@@ -190,23 +229,20 @@ document.addEventListener("keyup", (e) => (keys[e.code] = false));
 
 // Shooting
 const raycaster = new THREE.Raycaster();
-const maxBulletDistance = 100; // Max distance for bullet trajectory if no hit
+const maxBulletDistance = 100;
 document.addEventListener("mousedown", (e) => {
   if (e.button === 0 && controls.isLocked && isGameActive) {
-    // Muzzle flash effect at gun tip
     const gunTip = new THREE.Vector3(0.2, -0.2, -1).applyMatrix4(
       gun.matrixWorld
     );
     createParticleEffect(gunTip, 10, 0.2, 0.2);
 
-    // Bullet trajectory
     raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
     const intersects = raycaster.intersectObjects(targets.map((t) => t.mesh));
     let endPoint: THREE.Vector3;
     if (intersects.length > 0) {
       endPoint = intersects[0].point;
     } else {
-      // No hit, extend ray to max distance
       const direction = new THREE.Vector3();
       raycaster.ray.direction.copy(
         direction.set(0, 0, -1).applyQuaternion(camera.quaternion)
@@ -217,18 +253,17 @@ document.addEventListener("mousedown", (e) => {
     }
     createBulletTrajectory(gunTip, endPoint);
 
-    // Handle target hit
     if (intersects.length > 0) {
       const hitMesh = intersects[0].object;
       const hitPoint = intersects[0].point;
       const index = targets.findIndex((t) => t.mesh === hitMesh);
       if (index !== -1) {
-        // Impact effect at hit point
         createParticleEffect(hitPoint, 20, 0.5, 0.5);
         scene.remove(targets[index].mesh);
         world.removeBody(targets[index].body);
         targets.splice(index, 1);
-        spawnTarget();
+        score++; // Increment score
+        spawnTarget(); // Spawn new target
       }
     }
   }
@@ -240,11 +275,25 @@ startGameButton.addEventListener("click", () => {
 });
 
 controls.addEventListener("lock", () => {
+  if (playerName.length === 0) return; // Prevent starting without name
   controls.isLocked = true;
   isGameActive = true;
   mainMenu.style.display = "none";
   crosshair.style.display = "block";
   exitMessage.style.display = "block";
+  timerDisplay.style.display = "block";
+  score = 0; // Reset score
+  timeLeft = 30; // Reset timer
+  timerId = setInterval(() => {
+    timeLeft -= 0.016; // Match physics step
+    timerDisplay.textContent = `Time: ${timeLeft.toFixed(1)}s`;
+    if (timeLeft <= 0) {
+      isGameActive = false;
+      controls.unlock();
+      convex.mutation(api.leaderboard.saveScore, { playerName, score }); // Use api.leaderboard.saveScore
+      clearInterval(timerId!);
+    }
+  }, 16); // ~60 FPS
 });
 
 controls.addEventListener("unlock", () => {
@@ -253,6 +302,8 @@ controls.addEventListener("unlock", () => {
   mainMenu.style.display = "flex";
   crosshair.style.display = "none";
   exitMessage.style.display = "none";
+  timerDisplay.style.display = "none";
+  if (timerId) clearInterval(timerId);
 });
 
 // Particle system for muzzle flash and impact
